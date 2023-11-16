@@ -2,63 +2,47 @@ import math
 
 import torch
 from torch.nn import CrossEntropyLoss
-from torchvision.models.segmentation import deeplabv3_resnet50, fcn_resnet50
+from torchvision.models.segmentation import deeplabv3_resnet50, fcn_resnet50, deeplabv3_resnet101
 from torchvision.ops import sigmoid_focal_loss
 from tqdm import tqdm
 import numpy as np
 from os import listdir
 from PIL import Image
-from utils import train_mapping_to_rgb
-
-val_imgroot = './data2/val/img'
-val_labelroot = './data2/val/labels'
-imgroot = './data2/train/img'
-labelroot = './data2/train/labels'
+from utils import train_mapping_to_rgb, load_images, load_labels, invert_channels, augment_pairs, to_tensor, imgroot, val_imgroot, project_out
+from PIL import ImageFilter
 
 losses = []
 accuracies = []
 val_losses = []
 val_accuracies = []
 
-def project_out(out, colored=False):
-    projected = np.zeros(shape=(out.shape[0], out.shape[2], out.shape[3]))
-    for i in range(len(out)):
-        for w in range(out.shape[2]):
-            for h in range(out.shape[3]):
-                max = -999
-                _ = -1
-                for c in range(out.shape[1]):
-                    if out[i][c][w][h] > max:
-                        max = out[i][c][w][h]
-                        _ = c
-                if colored:
-                    _ = train_mapping_to_rgb[_]
-                projected[i][w][h] = _
-    return projected
-
-def load_images(image_names, validation=False, device="cuda"):
-    return np.array([np.moveaxis(np.array(Image.open(f"{imgroot if not validation else val_imgroot}/{x}")), -1, 0) for x in image_names])
-
-def load_labels(image_names, validation=False):
-    return np.array([np.array(Image.open(f"{labelroot if not validation else val_labelroot}/{x}")) for x in image_names])
 
 def train():
     images = listdir(imgroot)
     val_images = listdir(val_imgroot)
 
-    batch_size = 8
-    epochs = 50
+    batch_size = 4
+    epochs = 101
+    lr = 0.001
+    lr_decay = 0.97
 
+    # Resnet50 training: ~3min/epoch
+    # Resnet101 training: ~3.5min/epoch
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = deeplabv3_resnet50(num_classes=19)
+    #model = deeplabv3_resnet101(num_classes=19)
+    model = deeplabv3_resnet50(pretrained=True)
+    model.classifier[4] = torch.nn.Conv2d(256, 19, kernel_size=(1,1), stride=(1,1))
     model.to(device)
     model.eval()
     # model.load_state_dict(torch.load("models/model.pth"))
 
     criterion = CrossEntropyLoss(ignore_index=255)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     for epoch in range(epochs):
+        #for g in optimizer.param_groups:
+        #    g['lr'] = lr * lr_decay**epoch
+
         np.random.shuffle(images)
         acum_loss = 0
         correct = 0
@@ -74,8 +58,15 @@ def train():
             bar.set_description(f"Epoch {epoch} loss: {acum_loss/(i*batch_size+1)} accuracy: {round((correct/(total+1))*100, 1)}% val loss:{val_loss/(val_ct+1)} val accuracy: {round((val_correct / (val_total + 1)) * 100, 1)}")
 
             image_names = images[i:i+batch_size]
-            batch_img = torch.tensor(load_images(image_names), dtype=torch.float32).to(device)
-            batch_labels = torch.tensor(load_labels(image_names), dtype=torch.long).to(device)
+            
+            #batch_img = load_images(image_names, filter=ImageFilter.GaussianBlur(3))
+            batch_img = load_images(image_names)
+            batch_labels = load_labels(image_names)
+            #batch_img, batch_labels = augment_pairs(batch_img, batch_labels)
+
+            batch_img = to_tensor(invert_channels(batch_img), device=device)
+            batch_labels = to_tensor(batch_labels, dtype=torch.long, device=device)
+
             out = model(batch_img)["out"]
             loss = criterion(out, batch_labels)
             loss.backward()
@@ -90,12 +81,14 @@ def train():
                 correct += (projected == batch_labels).sum().item()
                 total += batch_labels.size
 
-                Image.fromarray(projected[0]).show()
+                #Image.fromarray(projected[0]).show()
 
                 # Calculate loss and accuracy of validation
                 np.random.shuffle(val_images)
-                val_imgs = torch.tensor(load_images(val_images[0:batch_size], True), dtype=torch.float32).to(device)
-                val_labels = torch.tensor(load_labels(val_images[0:batch_size], True), dtype=torch.long).to(device)
+                #val_imgs = torch.tensor(load_images(val_images[:batch_size], True), dtype=torch.float32).to(device)
+                #val_labels = torch.tensor(load_labels(val_images[:batch_size], True), dtype=torch.long).to(device)
+                val_imgs = to_tensor(invert_channels(load_images(val_images[:batch_size], True)), device=device)
+                val_labels = to_tensor(load_labels(val_images[:batch_size], True), dtype=torch.long, device=device)
 
                 out = model(val_imgs)['out']
                 val_loss += criterion(out, val_labels).item()
@@ -119,7 +112,8 @@ def train():
         np.save("val_accuracies.npy", np.array(val_accuracies))
         np.save("val_losses.npy", np.array(val_losses))
 
-    torch.save(model.state_dict(), "models/model.pth")
+    if epoch % 5 == 0:
+        torch.save(model.state_dict(), "models/model.pth")
 
 if __name__ == "__main__":
     train()

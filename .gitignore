@@ -5,3 +5,7 @@ data2
 fcn
 __pycache__
 tmp_config.json
+models
+example*
+deepnet_rnet50
+deepnet_rnet50_2
